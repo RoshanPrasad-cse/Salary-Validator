@@ -26,7 +26,8 @@ class Submission(models.Model):
     stock_rsu = models.IntegerField(default=0)
     total_compensation = models.IntegerField()
     ip_address = models.GenericIPAddressField(null=True, blank=True)
-    submitted_at = models.DateTimeField()
+    # Look for this line around the middle of your Submission class and change it to:
+    submitted_at = models.DateTimeField(null=True, blank=True)
 
     # ── Validation result fields (filled after running validators) ─────────────
     # overall_score: 0-100, calculated as (rule_score * 0.6) + (ai_score * 0.4)

@@ -47,9 +47,13 @@ class SubmissionInputSerializer(serializers.Serializer):
     level = serializers.CharField(max_length=50)
     location = serializers.CharField(max_length=200)
     years_of_experience = serializers.IntegerField(min_value=0, max_value=60)
-    base_salary = serializers.IntegerField(min_value=0)
-    bonus = serializers.IntegerField(min_value=0, default=0)
-    stock_rsu = serializers.IntegerField(min_value=0, default=0)
-    total_compensation = serializers.IntegerField(min_value=0)
+    base_salary = serializers.IntegerField(min_value=0, max_value=10_000_000)
+    bonus = serializers.IntegerField(min_value=0, max_value=10_000_000,  default=0)
+    stock_rsu = serializers.IntegerField(min_value=0, max_value=50_000_000, default=0)
+    total_compensation = serializers.IntegerField(min_value=0, max_value=50_000_000)
     ip_address = serializers.IPAddressField(required=False, allow_null=True, default=None)
-    submitted_at = serializers.DateTimeField()
+    submitted_at = serializers.DateTimeField(required=False, allow_null=True, default=None)
+    
+    class Meta:
+        model = Submission
+        fields = '__all__'    
