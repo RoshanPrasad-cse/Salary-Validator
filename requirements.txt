@@ -1,0 +1,17 @@
+# Salary-Validator Backend Framework Dependencies
+# Role Assignment: (Backend Core Engine & API Architecture)
+
+# Core Web Framework & Routing
+django>=4.2,<5.0
+djangorestframework>=3.14,<4.0
+
+# API Middleware & Security
+django-cors-headers>=4.3,<5.0
+whitenoise>=6.6,<7.0
+
+# Environment & Configuration Secrets Management
+python-decouple>=3.8
+python-dotenv>=1.0.1
+
+# Network & Synchronous HTTP Engine
+requests>=2.31.0
