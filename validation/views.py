@@ -1,232 +1,164 @@
-"""
-validation/views.py — API endpoint logic (the heart of Person 2's work)
-
-This file handles what happens when someone calls our API endpoints.
-It imports Person 1's validator.py and Person 3's ai_validator.py,
-runs both, merges scores, and saves to the database.
-"""
-
-from django.db.models import Avg, Count, Q
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from django.db.models import Avg, Count, Q
 
 from .models import Submission
-from .serializers import SubmissionSerializer, SubmissionInputSerializer
+from .serializers import SubmissionSerializer
 
-# Import validators — these files are stubs until Person 1 & 3 finish their parts
-# If the files don't exist yet, we use a safe fallback so you can still run the server
-try:
-    from .validator import RuleBasedValidator
-except ImportError:
-    # Stub fallback — returns a neutral score until Person 1 delivers validator.py
-    class RuleBasedValidator:
-        def validate(self, data):
-            return {"score": 50, "flags": [{"rule": "stub", "severity": "low", "message": "Rule validator not yet integrated"}]}
-
-try:
-    from .ai_validator import AIValidator
-except ImportError:
-    # Stub fallback — returns a neutral score until Person 3 delivers ai_validator.py
-    class AIValidator:
-        def validate(self, data):
-            return {"score": 50, "flags": [{"rule": "stub", "severity": "low", "message": "AI validator not yet integrated"}]}
+# 1. PERSON 2 CHANGE: Imported get_combined_score alongside AIValidator
+from .validator import RuleBasedValidator
+from .ai_validator import AIValidator, get_combined_score
 
 
-def calculate_confidence(score):
-    """Convert a numeric score to a confidence label."""
-    if score >= 75:
-        return "high"
-    elif score >= 50:
-        return "medium"
-    else:
-        return "low"
-
-
-def run_validation_pipeline(data: dict) -> dict:
+class SubmissionListCreateView(APIView):
     """
-    Core validation pipeline — called for every submission.
-    
-    1. Run rule-based validator (Person 1)
-    2. Run AI validator (Person 3)
-    3. Merge: final = (rule * 0.6) + (ai * 0.4)
-    4. Return merged result
-    """
-    # Step 1: Rule-based validation
-    rule_validator = RuleBasedValidator()
-    rule_result = rule_validator.validate(data)
-    rule_score = rule_result.get("score", 50)
-    rule_flags = rule_result.get("flags", [])
-
-    # Step 2: AI validation
-    ai_validator = AIValidator()
-    ai_result = ai_validator.validate(data)
-    ai_score = ai_result.get("score", 50)
-    ai_flags = ai_result.get("flags", [])
-
-    # Step 3: Merge scores (60/40 split as per contract)
-    final_score = int((rule_score * 0.6) + (ai_score * 0.4))
-
-    # Step 4: Merge flags from both validators
-    all_flags = rule_flags + ai_flags
-
-    return {
-        "overall_score": final_score,
-        "rule_score": rule_score,
-        "ai_score": ai_score,
-        "confidence_level": calculate_confidence(final_score),
-        "passed": final_score >= 60,
-        "flags": all_flags,
-    }
-
-
-# ── View 1: /api/submissions/ ──────────────────────────────────────────────────
-
-class SubmissionListView(APIView):
-    """
-    GET  /api/submissions/          → list all submissions
-    GET  /api/submissions/?filter=flagged → only flagged ones
-    POST /api/submissions/          → validate + save one submission
+    Handles POST /api/submissions/ (Submit + Validate)
+    Handles GET /api/submissions/  (List with query filtering)
     """
 
     def get(self, request):
-        """Return all submissions, optionally filtered."""
         queryset = Submission.objects.all()
 
-        # ?filter=flagged — only return submissions that didn't pass
-        if request.query_params.get("filter") == "flagged":
-            queryset = queryset.filter(passed=False)
+        # Query filter: ?filter=flagged
+        filter_param = request.query_params.get("filter", None)
+        if filter_param == "flagged":
+            queryset = queryset.filter(Q(passed=False) | ~Q(flags=[]))
 
         serializer = SubmissionSerializer(queryset, many=True)
         return Response(serializer.data)
 
     def post(self, request):
-        """Validate a new submission and save it."""
-        # Step 1: Validate the incoming JSON shape
-        input_serializer = SubmissionInputSerializer(data=request.data)
-        if not input_serializer.is_valid():
-            return Response(
-                {"error": "Invalid input", "details": input_serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST,
+        serializer = SubmissionSerializer(data=request.data)
+
+        # Fix: Standard DRF validation syntax
+        if serializer.is_valid():
+            submission_data = serializer.validated_data
+
+            # Instantiate both validation engines (Person 1 and Person 3)
+            rule_engine = RuleBasedValidator()
+            ai_engine = AIValidator()
+
+            # Run independent evaluation pipelines
+            rule_result = rule_engine.validate(submission_data)
+            ai_result = ai_engine.validate(submission_data)
+
+            rule_score = rule_result.get("score", 0)
+            ai_score = ai_result.get("score", 0)
+
+            # 2. PERSON 2 CHANGE: Replaced inline math formula with teammate function
+            final_score = get_combined_score(rule_score, ai_score)
+
+            # Aggregate results and flags from both layers
+            combined_flags = rule_result.get("flags", []) + ai_result.get(
+                "flags", []
             )
 
-        data = input_serializer.validated_data
+            # Calculate confidence dynamically based on final score
+            if final_score >= 80:
+                confidence = "high"
+            elif final_score >= 50:
+                confidence = "medium"
+            else:
+                confidence = "low"
 
-        # Step 2: Run through both validators
-        validation_result = run_validation_pipeline(data)
+            # Save the fully populated record to the database
+            submission = serializer.save(
+                ip_address=self.get_client_ip(request),
+                rule_score=rule_score,
+                ai_score=ai_score,
+                overall_score=final_score,
+                confidence_level=confidence,
+                passed=True if final_score >= 60 else False,
+                flags=combined_flags,
+            )
 
-        # Step 3: Save to database (merge submission data + validation result)
-        submission = Submission.objects.create(
-            name=data["name"],
-            email=data["email"],
-            company=data["company"],
-            title=data["title"],
-            level=data["level"],
-            location=data["location"],
-            years_of_experience=data["years_of_experience"],
-            base_salary=data["base_salary"],
-            bonus=data.get("bonus", 0),
-            stock_rsu=data.get("stock_rsu", 0),
-            total_compensation=data["total_compensation"],
-            ip_address=data.get("ip_address"),
-            submitted_at=data["submitted_at"],
-            # Validation results
-            overall_score=validation_result["overall_score"],
-            rule_score=validation_result["rule_score"],
-            ai_score=validation_result["ai_score"],
-            confidence_level=validation_result["confidence_level"],
-            passed=validation_result["passed"],
-            flags=validation_result["flags"],
-        )
+            return Response(
+                SubmissionSerializer(submission).data,
+                status=status.HTTP_201_CREATED,
+            )
 
-        # Step 4: Return the saved submission with validation results
-        serializer = SubmissionSerializer(submission)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    def get_client_ip(self, request):
+        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+        if x_forwarded_for:
+            return x_forwarded_for.split(",")[0].strip()
+        return request.META.get("REMOTE_ADDR")
 
-# ── View 2: /api/submissions/batch/ ───────────────────────────────────────────
 
 class BatchSubmissionView(APIView):
     """
-    POST /api/submissions/batch/
-    Accepts a list of submissions and validates each one.
-    Body: {"submissions": [ {...}, {...} ]}
+    Handles POST /api/submissions/batch/
     """
 
     def post(self, request):
-        submissions_data = request.data.get("submissions", [])
-
-        if not isinstance(submissions_data, list):
+        if not isinstance(request.data, list):
             return Response(
-                {"error": "Expected a 'submissions' list"},
+                {"error": "Expected a list of submissions."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         results = []
-        for item in submissions_data:
-            input_serializer = SubmissionInputSerializer(data=item)
-            if not input_serializer.is_valid():
-                results.append({"error": input_serializer.errors, "input": item})
-                continue
+        rule_engine = RuleBasedValidator()
+        ai_engine = AIValidator()
 
-            data = input_serializer.validated_data
-            validation_result = run_validation_pipeline(data)
+        for item in request.data:
+            serializer = SubmissionSerializer(data=item)
+            if serializer.is_valid():
+                sub_data = serializer.validated_data
+                r_res = rule_engine.validate(sub_data)
+                a_res = ai_engine.validate(sub_data)
 
-            submission = Submission.objects.create(
-                name=data["name"],
-                email=data["email"],
-                company=data["company"],
-                title=data["title"],
-                level=data["level"],
-                location=data["location"],
-                years_of_experience=data["years_of_experience"],
-                base_salary=data["base_salary"],
-                bonus=data.get("bonus", 0),
-                stock_rsu=data.get("stock_rsu", 0),
-                total_compensation=data["total_compensation"],
-                ip_address=data.get("ip_address"),
-                submitted_at=data["submitted_at"],
-                overall_score=validation_result["overall_score"],
-                rule_score=validation_result["rule_score"],
-                ai_score=validation_result["ai_score"],
-                confidence_level=validation_result["confidence_level"],
-                passed=validation_result["passed"],
-                flags=validation_result["flags"],
-            )
-            results.append(SubmissionSerializer(submission).data)
+                r_score = r_res.get("score", 0)
+                a_score = a_res.get("score", 0)
 
-        return Response({"results": results}, status=status.HTTP_201_CREATED)
+                # Person 2 Change applied here for batch requests as well
+                f_score = get_combined_score(r_score, a_score)
 
+                sub = serializer.save(
+                    rule_score=r_score,
+                    ai_score=a_score,
+                    overall_score=f_score,
+                    confidence_level="high" if f_score >= 80 else "medium",
+                    passed=True if f_score >= 60 else False,
+                    flags=r_res.get("flags", []) + a_res.get("flags", []),
+                )
+                results.append(SubmissionSerializer(sub).data)
+            else:
+                results.append({"error": serializer.errors, "raw_data": item})
 
-# ── View 3: /api/dashboard/stats/ ─────────────────────────────────────────────
+        return Response(results, status=status.HTTP_200_OK)
+
 
 class DashboardStatsView(APIView):
     """
-    GET /api/dashboard/stats/
-    Returns summary statistics for the frontend dashboard.
+    Handles GET /api/dashboard/stats/
     """
 
     def get(self, request):
-        total = Submission.objects.count()
-        passed = Submission.objects.filter(passed=True).count()
-        flagged = Submission.objects.filter(passed=False).count()
+        stats = Submission.objects.aggregate(
+            total=Count("id"),
+            passed_count=Count("id", filter=Q(passed=True)),
+            flagged_count=Count("id", filter=Q(passed=False)),
+            avg_score=Avg("overall_score"),
+        )
 
-        avg_score_result = Submission.objects.aggregate(avg=Avg("overall_score"))
-        average_score = round(avg_score_result["avg"] or 0, 1)
-
-        # Count flags with severity="high" across all submissions
-        # flags is a JSONField (list of dicts), so we count submissions that
-        # have at least one high-severity flag
+        all_submissions = Submission.objects.all()
         high_severity_count = 0
-        for submission in Submission.objects.exclude(flags=[]):
-            for flag in submission.flags:
-                if isinstance(flag, dict) and flag.get("severity") == "high":
+        for sub in all_submissions:
+            for flag in sub.flags:
+                if flag.get("severity") == "high":
                     high_severity_count += 1
 
-        return Response({
-            "total_submissions": total,
-            "passed": passed,
-            "flagged": flagged,
-            "average_score": average_score,
-            "high_severity_flags": high_severity_count,
-        })
+        return Response(
+            {
+                "total_submissions": stats["total"] or 0,
+                "passed": stats["passed_count"] or 0,
+                "flagged": stats["flagged_count"] or 0,
+                "average_score": round(stats["avg_score"], 1)
+                if stats["avg_score"]
+                else 0.0,
+                "high_severity_flags": high_severity_count,
+            }
+        )
