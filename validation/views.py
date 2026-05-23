@@ -1,12 +1,13 @@
+from django.db.models import Avg, Count, Q
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from django.db.models import Avg, Count, Q
 
 from .models import Submission
-from .serializers import SubmissionSerializer
+# Standard SubmissionSerializer handles output formatting
+# SubmissionInputSerializer handles user input validation boundaries
+from .serializers import SubmissionSerializer, SubmissionInputSerializer
 
-# 1. PERSON 2 CHANGE: Imported get_combined_score alongside AIValidator
 from .validator import RuleBasedValidator
 from .ai_validator import AIValidator, get_combined_score
 
@@ -29,32 +30,30 @@ class SubmissionListCreateView(APIView):
         return Response(serializer.data)
 
     def post(self, request):
-        serializer = SubmissionSerializer(data=request.data)
+        # Explicit validation pass using SubmissionInputSerializer
+        serializer = SubmissionInputSerializer(data=request.data)
 
-        # Fix: Standard DRF validation syntax
         if serializer.is_valid():
             submission_data = serializer.validated_data
 
-            # Instantiate both validation engines (Person 1 and Person 3)
+            # Instantiate processing layers
             rule_engine = RuleBasedValidator()
             ai_engine = AIValidator()
 
-            # Run independent evaluation pipelines
+            # Process parallel analytics engines
             rule_result = rule_engine.validate(submission_data)
             ai_result = ai_engine.validate(submission_data)
 
             rule_score = rule_result.get("score", 0)
             ai_score = ai_result.get("score", 0)
 
-            # 2. PERSON 2 CHANGE: Replaced inline math formula with teammate function
+            # Combined scoring utility logic function execution
             final_score = get_combined_score(rule_score, ai_score)
 
-            # Aggregate results and flags from both layers
-            combined_flags = rule_result.get("flags", []) + ai_result.get(
-                "flags", []
-            )
+            # Join flag data lists cleanly
+            combined_flags = rule_result.get("flags", []) + ai_result.get("flags", [])
 
-            # Calculate confidence dynamically based on final score
+            # Dynamic assignment of confidence categorization metric
             if final_score >= 80:
                 confidence = "high"
             elif final_score >= 50:
@@ -62,9 +61,21 @@ class SubmissionListCreateView(APIView):
             else:
                 confidence = "low"
 
-            # Save the fully populated record to the database
-            submission = serializer.save(
+            # Create entry directly inside model layer using custom values
+            submission = Submission.objects.create(
+                name=submission_data["name"],
+                email=submission_data["email"],
+                company=submission_data["company"],
+                title=submission_data["title"],
+                level=submission_data["level"],
+                location=submission_data["location"],
+                years_of_experience=submission_data["years_of_experience"],
+                base_salary=submission_data["base_salary"],
+                bonus=submission_data.get("bonus", 0),
+                stock_rsu=submission_data.get("stock_rsu", 0),
+                total_compensation=submission_data["total_compensation"],
                 ip_address=self.get_client_ip(request),
+                submitted_at=submission_data.get("submitted_at"),
                 rule_score=rule_score,
                 ai_score=ai_score,
                 overall_score=final_score,
@@ -90,12 +101,14 @@ class SubmissionListCreateView(APIView):
 class BatchSubmissionView(APIView):
     """
     Handles POST /api/submissions/batch/
+    Expects Body Format: {"submissions": [ {...}, {...} ]}
     """
 
     def post(self, request):
-        if not isinstance(request.data, list):
+        submissions_data = request.data.get("submissions", [])
+        if not isinstance(submissions_data, list):
             return Response(
-                {"error": "Expected a list of submissions."},
+                {"error": "Expected a dict wrapper containing a 'submissions' list."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -103,8 +116,8 @@ class BatchSubmissionView(APIView):
         rule_engine = RuleBasedValidator()
         ai_engine = AIValidator()
 
-        for item in request.data:
-            serializer = SubmissionSerializer(data=item)
+        for item in submissions_data:
+            serializer = SubmissionInputSerializer(data=item)
             if serializer.is_valid():
                 sub_data = serializer.validated_data
                 r_res = rule_engine.validate(sub_data)
@@ -112,11 +125,21 @@ class BatchSubmissionView(APIView):
 
                 r_score = r_res.get("score", 0)
                 a_score = a_res.get("score", 0)
-
-                # Person 2 Change applied here for batch requests as well
                 f_score = get_combined_score(r_score, a_score)
 
-                sub = serializer.save(
+                submission = Submission.objects.create(
+                    name=sub_data["name"],
+                    email=sub_data["email"],
+                    company=sub_data["company"],
+                    title=sub_data["title"],
+                    level=sub_data["level"],
+                    location=sub_data["location"],
+                    years_of_experience=sub_data["years_of_experience"],
+                    base_salary=sub_data["base_salary"],
+                    bonus=sub_data.get("bonus", 0),
+                    stock_rsu=sub_data.get("stock_rsu", 0),
+                    total_compensation=sub_data["total_compensation"],
+                    submitted_at=sub_data.get("submitted_at"),
                     rule_score=r_score,
                     ai_score=a_score,
                     overall_score=f_score,
@@ -124,11 +147,11 @@ class BatchSubmissionView(APIView):
                     passed=True if f_score >= 60 else False,
                     flags=r_res.get("flags", []) + a_res.get("flags", []),
                 )
-                results.append(SubmissionSerializer(sub).data)
+                results.append(SubmissionSerializer(submission).data)
             else:
                 results.append({"error": serializer.errors, "raw_data": item})
 
-        return Response(results, status=status.HTTP_200_OK)
+        return Response({"results": results}, status=status.HTTP_201_CREATED)
 
 
 class DashboardStatsView(APIView):
@@ -148,7 +171,7 @@ class DashboardStatsView(APIView):
         high_severity_count = 0
         for sub in all_submissions:
             for flag in sub.flags:
-                if flag.get("severity") == "high":
+                if isinstance(flag, dict) and flag.get("severity") == "high":
                     high_severity_count += 1
 
         return Response(
@@ -156,9 +179,7 @@ class DashboardStatsView(APIView):
                 "total_submissions": stats["total"] or 0,
                 "passed": stats["passed_count"] or 0,
                 "flagged": stats["flagged_count"] or 0,
-                "average_score": round(stats["avg_score"], 1)
-                if stats["avg_score"]
-                else 0.0,
+                "average_score": round(stats["avg_score"], 1) if stats["avg_score"] else 0.0,
                 "high_severity_flags": high_severity_count,
             }
         )
